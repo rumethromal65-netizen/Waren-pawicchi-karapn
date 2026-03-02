@@ -1,0 +1,5 @@
+{
+  "name": "Aether Study OS",
+  "description": "A futuristic, immersive study command center with real-time exam countdowns, daily planning, and focus tools.",
+  "requestFramePermissions": ["microphone"]
+}
