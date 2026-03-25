@@ -6,6 +6,9 @@ import {defineConfig, loadEnv} from 'vite';
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
   return {
+    // If deploying to GitHub Pages (e.g., username.github.io/repo-name/), 
+    // set base to '/repo-name/'. If using a custom domain, keep it as '/'.
+    base: '/',
     plugins: [react(), tailwindcss()],
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),

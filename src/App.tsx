@@ -20,7 +20,8 @@ import {
   RotateCcw,
   Monitor,
   Target,
-  AlertCircle
+  AlertCircle,
+  TrendingUp
 } from 'lucide-react';
 import { 
   format, 
@@ -40,7 +41,8 @@ import {
   Tooltip, 
   ResponsiveContainer,
   AreaChart,
-  Area
+  Area,
+  Legend
 } from 'recharts';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -52,6 +54,14 @@ import { GoogleGenAI } from "@google/genai";
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
+
+const generateId = () => {
+  try {
+    return crypto.randomUUID();
+  } catch (e) {
+    return Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+  }
+};
 
 // --- AI Service ---
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
@@ -83,6 +93,14 @@ interface StudySession {
   duration: number; // in minutes
 }
 
+interface MarkEntry {
+  id: string;
+  date: string; // ISO date
+  maths?: number;
+  physics?: number;
+  ict?: number;
+}
+
 interface AppState {
   tasks: Task[];
   sessions: StudySession[];
@@ -95,11 +113,12 @@ interface AppState {
   };
   reminders: Reminder[];
   alarms: Alarm[];
+  marksHistory: MarkEntry[];
 }
 
 // --- Constants ---
 const DEFAULT_EXAM_DATE = addDays(new Date(), 150).toISOString(); // 5 months from now
-const POMODORO_TIME = 25 * 60;
+const POMODORO_TIME = 5 * 60;
 const SHORT_BREAK = 5 * 60;
 
 export default function App() {
@@ -113,7 +132,8 @@ export default function App() {
       lastPlanDate: new Date().toISOString(),
       papers: { maths: 0, physics: 0, ict: 0 },
       reminders: [],
-      alarms: []
+      alarms: [],
+      marksHistory: []
     };
     
     if (saved) {
@@ -135,17 +155,42 @@ export default function App() {
   const [newReminderText, setNewReminderText] = useState('');
   const [newAlarmTime, setNewAlarmTime] = useState('08:00');
   const [newAlarmLabel, setNewAlarmLabel] = useState('');
+  const [newMarkMaths, setNewMarkMaths] = useState<number | ''>('');
+  const [newMarkPhysics, setNewMarkPhysics] = useState<number | ''>('');
+  const [newMarkIct, setNewMarkIct] = useState<number | ''>('');
   const [notifications, setNotifications] = useState<{ id: string; message: string; type: 'info' | 'alert' }[]>([]);
   const [aiInsight, setAiInsight] = useState<string>('Initializing neural link...');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [ringingAlarmIds, setRingingAlarmIds] = useState<string[]>([]);
+  const [chartSubjectFilter, setChartSubjectFilter] = useState<'all' | 'maths' | 'physics' | 'ict'>('all');
+  const [manualMinutes, setManualMinutes] = useState<number | ''>('');
+  const [manualDate, setManualDate] = useState(format(new Date(), 'yyyy-MM-dd'));
 
   // --- Refs ---
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
 
+  // --- Audio Resilience ---
+  useEffect(() => {
+    const resumeAudio = () => {
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        audioContextRef.current.resume();
+      }
+    };
+    window.addEventListener('click', resumeAudio);
+    window.addEventListener('touchstart', resumeAudio);
+    return () => {
+      window.removeEventListener('click', resumeAudio);
+      window.removeEventListener('touchstart', resumeAudio);
+    };
+  }, []);
+
   // --- AI Logic ---
   const generateAiInsight = async () => {
+    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === "undefined") {
+      setAiInsight("Neural link offline: GEMINI_API_KEY not detected in build. Ensure it is set in your deployment environment variables (e.g., GitHub Secrets).");
+      return;
+    }
     setIsAiLoading(true);
     try {
       const model = "gemini-3-flash-preview";
@@ -177,6 +222,26 @@ export default function App() {
   useEffect(() => {
     generateAiInsight();
   }, []);
+
+  const logManualSession = () => {
+    if (typeof manualMinutes === 'number' && manualMinutes > 0) {
+      const sessionDate = manualDate === format(new Date(), 'yyyy-MM-dd') 
+        ? new Date().toISOString() 
+        : new Date(manualDate + 'T12:00:00').toISOString();
+
+      const newSession: StudySession = {
+        date: sessionDate,
+        duration: manualMinutes
+      };
+      setState(prev => ({
+        ...prev,
+        sessions: [...prev.sessions, newSession]
+      }));
+      setManualMinutes('');
+      playNotificationSound();
+      addNotification(`Logged ${manualMinutes}m for ${format(parseISO(manualDate), 'MMM do')}`, 'info');
+    }
+  };
 
   // --- Sound Logic ---
   const playNotificationSound = () => {
@@ -288,7 +353,7 @@ export default function App() {
     e.preventDefault();
     if (!newTaskText.trim()) return;
     const newTask: Task = {
-      id: crypto.randomUUID(),
+      id: generateId(),
       text: newTaskText,
       completed: false,
       category: 'study'
@@ -331,7 +396,7 @@ export default function App() {
 
   // --- Notifications ---
   const addNotification = (message: string, type: 'info' | 'alert' = 'info') => {
-    const id = crypto.randomUUID();
+    const id = generateId();
     setNotifications(prev => [...prev, { id, message, type }]);
     playNotificationSound();
     setTimeout(() => {
@@ -344,7 +409,7 @@ export default function App() {
     e.preventDefault();
     if (!newReminderText.trim()) return;
     const newReminder: Reminder = {
-      id: crypto.randomUUID(),
+      id: generateId(),
       text: newReminderText,
       createdAt: new Date().toISOString()
     };
@@ -361,7 +426,7 @@ export default function App() {
   const addAlarm = (e: React.FormEvent) => {
     e.preventDefault();
     const newAlarm: Alarm = {
-      id: crypto.randomUUID(),
+      id: generateId(),
       time: newAlarmTime,
       label: newAlarmLabel || 'Alarm',
       active: true
@@ -388,6 +453,39 @@ export default function App() {
 
   const dismissAlarm = (id: string) => {
     setRingingAlarmIds(prev => prev.filter(aid => aid !== id));
+  };
+
+  const addMarkEntry = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newMarkMaths === '' && newMarkPhysics === '' && newMarkIct === '') {
+      addNotification("Please enter at least one subject mark.", "alert");
+      return;
+    }
+    
+    const newEntry: MarkEntry = {
+      id: generateId(),
+      date: new Date().toISOString(),
+      ...(newMarkMaths !== '' && { maths: Number(newMarkMaths) }),
+      ...(newMarkPhysics !== '' && { physics: Number(newMarkPhysics) }),
+      ...(newMarkIct !== '' && { ict: Number(newMarkIct) })
+    };
+    
+    setState(prev => ({
+      ...prev,
+      marksHistory: [...prev.marksHistory, newEntry]
+    }));
+    
+    setNewMarkMaths('');
+    setNewMarkPhysics('');
+    setNewMarkIct('');
+    addNotification("Marks recorded successfully.", "info");
+  };
+
+  const deleteMarkEntry = (id: string) => {
+    setState(prev => ({
+      ...prev,
+      marksHistory: prev.marksHistory.filter(m => m.id !== id)
+    }));
   };
 
   // Check Alarms
@@ -461,20 +559,92 @@ export default function App() {
     };
   }, [state.examDate, currentTime]);
 
-  const analyticsData = useMemo(() => {
-    const last7Days = Array.from({ length: 7 }, (_, i) => {
-      const d = addDays(new Date(), -i);
-      return format(d, 'yyyy-MM-dd');
-    }).reverse();
+  const currentDayStr = format(currentTime, 'yyyy-MM-dd');
 
-    return last7Days.map(date => {
-      const daySessions = state.sessions.filter(s => s.date.startsWith(date));
+  const analyticsData = useMemo(() => {
+    const today = startOfDay(parseISO(currentDayStr));
+    
+    if (state.sessions.length === 0) {
+      // Default to last 7 days if no sessions
+      return Array.from({ length: 7 }, (_, i) => {
+        const d = addDays(today, -6 + i);
+        const dateStr = format(d, 'yyyy-MM-dd');
+        return {
+          id: dateStr,
+          name: format(d, 'EEE'),
+          fullDate: format(d, 'MMM do'),
+          hours: 0,
+          isToday: i === 6
+        };
+      });
+    }
+
+    // Sort sessions by date
+    const sortedSessions = [...state.sessions].sort((a, b) => 
+      new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
+
+    const firstDate = startOfDay(parseISO(sortedSessions[0].date.split('T')[0]));
+    
+    // Calculate days between first session and today
+    const daysCount = Math.max(7, differenceInDays(today, firstDate) + 1);
+    const startDate = daysCount > 7 ? firstDate : addDays(today, -6);
+
+    return Array.from({ length: daysCount }, (_, i) => {
+      const currentDay = addDays(startDate, i);
+      const dateStr = format(currentDay, 'yyyy-MM-dd');
+      
+      const daySessions = state.sessions.filter(s => {
+        try {
+          return s.date.startsWith(dateStr);
+        } catch (e) {
+          return false;
+        }
+      });
+      
       const totalMinutes = daySessions.reduce((acc, s) => acc + s.duration, 0);
+      
       return {
-        name: format(parseISO(date), 'EEE'),
-        hours: parseFloat((totalMinutes / 60).toFixed(1))
+        id: dateStr,
+        name: format(currentDay, 'EEE'),
+        fullDate: format(currentDay, 'MMM do'),
+        hours: parseFloat((totalMinutes / 60).toFixed(1)),
+        isToday: dateStr === currentDayStr
       };
     });
+  }, [state.sessions, currentDayStr]);
+
+  const studyStats = useMemo(() => {
+    const totalMinutes = state.sessions.reduce((acc, s) => acc + s.duration, 0);
+    const totalHours = (totalMinutes / 60).toFixed(1);
+    
+    const dayMap: Record<string, number> = {};
+    state.sessions.forEach(s => {
+      const d = s.date.split('T')[0];
+      dayMap[d] = (dayMap[d] || 0) + s.duration;
+    });
+    
+    let maxMinutes = 0;
+    Object.values(dayMap).forEach(m => { if (m > maxMinutes) maxMinutes = m; });
+    
+    let streak = 0;
+    let checkDate = new Date();
+    while (true) {
+      const dateStr = format(checkDate, 'yyyy-MM-dd');
+      if (dayMap[dateStr]) {
+        streak++;
+        checkDate = addDays(checkDate, -1);
+      } else {
+        break;
+      }
+    }
+
+    return {
+      totalHours,
+      bestDayHours: (maxMinutes / 60).toFixed(1),
+      streak,
+      avgDaily: (state.sessions.length > 0 ? (totalMinutes / 60 / 30) : 0).toFixed(1)
+    };
   }, [state.sessions]);
 
   const progressPercentage = useMemo(() => {
@@ -482,6 +652,63 @@ export default function App() {
     const completed = state.tasks.filter(t => t.completed).length;
     return Math.round((completed / state.tasks.length) * 100);
   }, [state.tasks]);
+
+  const marksChartData = useMemo(() => {
+    if (state.marksHistory.length === 0) return [];
+
+    const today = startOfDay(parseISO(currentDayStr));
+    
+    // Sort history by date first to ensure correct order
+    const sortedHistory = [...state.marksHistory].sort((a, b) => 
+      new Date(a.date).getTime() - new Date(b.date).getTime()
+    );
+
+    const firstDate = startOfDay(parseISO(sortedHistory[0].date.split('T')[0]));
+    const daysCount = Math.max(7, differenceInDays(today, firstDate) + 1);
+    const startDate = daysCount > 7 ? firstDate : addDays(today, -6);
+    
+    // Create a map for quick lookup
+    const entryMap: Record<string, any> = {};
+    sortedHistory.forEach(entry => {
+      const dayKey = entry.date.split('T')[0];
+      if (!entryMap[dayKey]) entryMap[dayKey] = {};
+      if (entry.maths !== undefined) entryMap[dayKey].Maths = entry.maths;
+      if (entry.physics !== undefined) entryMap[dayKey].Physics = entry.physics;
+      if (entry.ict !== undefined) entryMap[dayKey].ICT = entry.ict;
+    });
+
+    return Array.from({ length: daysCount }, (_, i) => {
+      const currentDay = addDays(startDate, i);
+      const dayKey = format(currentDay, 'yyyy-MM-dd');
+      const dayLabel = format(currentDay, 'MMM do');
+      
+      return {
+        id: dayKey,
+        date: dayLabel,
+        ...entryMap[dayKey]
+      };
+    });
+  }, [state.marksHistory, currentDayStr]);
+
+  const subjectPerformance = useMemo(() => {
+    const getStats = (subject: 'maths' | 'physics' | 'ict') => {
+      const history = state.marksHistory
+        .filter(m => m[subject] !== undefined)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      
+      if (history.length === 0) return { current: 0, trend: 0 };
+      const current = history[history.length - 1][subject] || 0;
+      const previous = history.length > 1 ? (history[history.length - 2][subject] || 0) : current;
+      const trend = current - previous;
+      return { current, trend };
+    };
+
+    return {
+      maths: getStats('maths'),
+      physics: getStats('physics'),
+      ict: getStats('ict')
+    };
+  }, [state.marksHistory]);
 
   const rankingInfo = useMemo(() => {
     const total = state.papers.maths + state.papers.physics + state.papers.ict;
@@ -912,9 +1139,45 @@ export default function App() {
 
               <div className="mt-12 max-w-md text-center">
                 <h3 className="text-xl font-semibold mb-2">Deep Work Protocol</h3>
-                <p className="text-[var(--text-secondary)] text-sm">
-                  The Pomodoro technique helps you maintain high focus levels by breaking work into 25-minute intervals separated by short breaks.
+                <p className="text-[var(--text-secondary)] text-sm mb-8">
+                  The Pomodoro technique helps you maintain high focus levels by breaking work into 5-minute intervals separated by short breaks.
                 </p>
+
+                <div className="glass-card p-6 border border-white/10 w-full max-w-sm">
+                  <h4 className="text-xs font-bold uppercase tracking-widest text-[var(--text-secondary)] mb-4 text-center">Manual Log</h4>
+                  <div className="space-y-4">
+                    <div className="flex flex-col gap-2">
+                      <label className="text-[10px] uppercase tracking-widest text-left opacity-50">Date</label>
+                      <input 
+                        type="date" 
+                        value={manualDate}
+                        onChange={(e) => setManualDate(e.target.value)}
+                        className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 focus:outline-none focus:border-[var(--accent)] transition-colors text-sm"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="text-[10px] uppercase tracking-widest text-left opacity-50">Duration (Minutes)</label>
+                      <div className="flex gap-2">
+                        <input 
+                          type="number" 
+                          value={manualMinutes}
+                          onChange={(e) => setManualMinutes(e.target.value === '' ? '' : parseInt(e.target.value))}
+                          placeholder="Minutes"
+                          className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2 focus:outline-none focus:border-[var(--accent)] transition-colors text-center"
+                        />
+                        <button 
+                          onClick={logManualSession}
+                          className="px-6 py-2 bg-[var(--accent)] text-black rounded-lg text-xs font-bold uppercase tracking-widest transition-all hover:opacity-90"
+                        >
+                          Log
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-[var(--text-secondary)] mt-4 italic text-center">
+                    Log study sessions manually for any date.
+                  </p>
+                </div>
               </div>
             </motion.div>
           )}
@@ -927,34 +1190,108 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="space-y-8"
             >
-              <h2 className="text-3xl font-bold">Study <span className="neon-text">Analytics</span></h2>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                <div className="glass-card p-8">
-                  <h3 className="text-lg font-semibold mb-6">Weekly Distribution</h3>
-                  <div className="h-[300px]">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={analyticsData}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                        <XAxis dataKey="name" stroke="rgba(255,255,255,0.3)" />
-                        <YAxis stroke="rgba(255,255,255,0.3)" />
-                        <Tooltip 
-                          contentStyle={{ backgroundColor: '#141414', border: '1px solid rgba(255,255,255,0.1)' }}
-                        />
-                        <Line type="monotone" dataKey="hours" stroke="var(--accent)" strokeWidth={3} dot={{ fill: 'var(--accent)', r: 6 }} />
-                      </LineChart>
-                    </ResponsiveContainer>
+              <div className="flex justify-between items-center">
+                <h2 className="text-3xl font-bold">Study <span className="neon-text">Analytics</span></h2>
+                <div className="flex gap-2">
+                  <div className="glass-card px-4 py-2 flex items-center gap-2">
+                    <Zap size={14} className="text-[var(--accent)]" />
+                    <span className="text-xs font-bold uppercase tracking-widest">{studyStats.streak} Day Streak</span>
                   </div>
                 </div>
+              </div>
+              
+              <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+                <div className="glass-card p-6 border-b-2 border-b-[var(--accent)]">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-secondary)] mb-1">Total Focus</div>
+                  <div className="text-3xl font-black italic">{studyStats.totalHours}H</div>
+                </div>
+                <div className="glass-card p-6 border-b-2 border-b-emerald-500">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-secondary)] mb-1">Best Day</div>
+                  <div className="text-3xl font-black italic">{studyStats.bestDayHours}H</div>
+                </div>
+                <div className="glass-card p-6 border-b-2 border-b-amber-500">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-secondary)] mb-1">Daily Avg</div>
+                  <div className="text-3xl font-black italic">{studyStats.avgDaily}H</div>
+                </div>
+                <div className="glass-card p-6 border-b-2 border-b-purple-500">
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-[var(--text-secondary)] mb-1">Sessions</div>
+                  <div className="text-3xl font-black italic">{state.sessions.length}</div>
+                </div>
+              </div>
 
-                <div className="glass-card p-8 flex flex-col justify-center items-center text-center">
-                  <div className="w-32 h-32 rounded-full border-4 border-[var(--accent)] flex items-center justify-center mb-6 shadow-[0_0_30px_rgba(0,242,255,0.2)]">
-                    <div className="text-4xl font-bold">{state.sessions.length}</div>
+              <div className="glass-card p-8">
+                <div className="flex justify-between items-center mb-8">
+                  <h3 className="text-lg font-semibold flex items-center gap-2">
+                    <BarChart3 size={18} className="text-[var(--accent)]" />
+                    30-Day Performance Matrix
+                  </h3>
+                  <button 
+                    onClick={() => {
+                      const el = document.getElementById('chart-container');
+                      if (el) el.scrollLeft = el.scrollWidth;
+                    }}
+                    className="text-[10px] uppercase tracking-widest opacity-50 hover:opacity-100 transition-opacity"
+                  >
+                    Jump to Today
+                  </button>
+                </div>
+                
+                <div id="chart-container" className="h-[350px] overflow-x-auto pb-4 custom-scrollbar">
+                  <div style={{ minWidth: analyticsData.length > 7 ? `${analyticsData.length * 60}px` : '100%', height: '100%' }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={analyticsData} margin={{ right: 20, left: -20, top: 10 }}>
+                        <defs>
+                          <linearGradient id="colorHours" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="var(--accent)" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="var(--accent)" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
+                        <XAxis 
+                          dataKey="id" 
+                          stroke="rgba(255,255,255,0.3)" 
+                          fontSize={10}
+                          tickFormatter={(value, index) => {
+                            const item = analyticsData[index];
+                            if (item?.isToday) return 'TODAY';
+                            // Show full date for the first day of the month or every 7 days
+                            if (index % 7 === 0) return item.fullDate;
+                            return item.name;
+                          }}
+                        />
+                        <YAxis stroke="rgba(255,255,255,0.3)" fontSize={10} />
+                        <Tooltip 
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              const data = payload[0].payload;
+                              return (
+                                <div className="glass-card p-3 border border-[var(--accent)]/20">
+                                  <div className="text-[10px] uppercase tracking-widest text-[var(--accent)] mb-1">{data.fullDate}</div>
+                                  <div className="text-xl font-bold">{data.hours} Hours</div>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
+                        />
+                        <Area 
+                          type="monotone" 
+                          dataKey="hours" 
+                          stroke="var(--accent)" 
+                          strokeWidth={3} 
+                          fillOpacity={1} 
+                          fill="url(#colorHours)" 
+                          dot={(props) => {
+                            const { cx, cy, payload } = props;
+                            if (payload.isToday) {
+                              return <circle cx={cx} cy={cy} r={6} fill="var(--accent)" stroke="white" strokeWidth={2} />;
+                            }
+                            return <circle cx={cx} cy={cy} r={3} fill="var(--accent)" />;
+                          }}
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
                   </div>
-                  <h3 className="text-xl font-bold mb-2">Total Sessions</h3>
-                  <p className="text-[var(--text-secondary)] max-w-xs">
-                    You've completed {state.sessions.length} focus sessions. That's approximately {Math.round(state.sessions.length * 25 / 60)} hours of deep work.
-                  </p>
                 </div>
               </div>
             </motion.div>
@@ -1020,6 +1357,163 @@ export default function App() {
                     </motion.div>
                   )}
                 </div>
+              </div>
+
+              {/* Mark Growth Section */}
+              <div className="space-y-8">
+                <div className="flex justify-between items-center">
+                  <h3 className="text-2xl font-bold flex items-center gap-3">
+                    <TrendingUp size={24} className="text-[var(--accent)]" />
+                    Subject Mark Growth
+                  </h3>
+                </div>
+
+                {/* Performance Summary */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {(['maths', 'physics', 'ict'] as const).map(s => (
+                    <div key={s} className="glass-card p-4 flex justify-between items-center">
+                      <div>
+                        <div className="text-[10px] uppercase tracking-widest text-[var(--text-secondary)]">{s}</div>
+                        <div className="text-2xl font-bold">{subjectPerformance[s].current}%</div>
+                      </div>
+                      <div className={cn(
+                        "text-xs font-bold px-2 py-1 rounded",
+                        subjectPerformance[s].trend >= 0 ? "bg-emerald-500/10 text-emerald-500" : "bg-red-500/10 text-red-500"
+                      )}>
+                        {subjectPerformance[s].trend >= 0 ? '+' : ''}{subjectPerformance[s].trend}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                  {/* Input Form */}
+                  <div className="glass-card p-6 space-y-6">
+                    <h4 className="text-sm font-bold uppercase tracking-widest text-[var(--text-secondary)]">Record New Marks</h4>
+                    <form onSubmit={addMarkEntry} className="space-y-4">
+                      <div className="space-y-2">
+                        <label className="text-[10px] uppercase tracking-widest opacity-50">Mathematics</label>
+                        <input 
+                          type="number" 
+                          value={newMarkMaths}
+                          onChange={(e) => setNewMarkMaths(e.target.value === '' ? '' : Number(e.target.value))}
+                          placeholder="0-100"
+                          className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 focus:outline-none focus:border-[var(--accent)] transition-colors"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-[10px] uppercase tracking-widest opacity-50">Physics</label>
+                        <input 
+                          type="number" 
+                          value={newMarkPhysics}
+                          onChange={(e) => setNewMarkPhysics(e.target.value === '' ? '' : Number(e.target.value))}
+                          placeholder="0-100"
+                          className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 focus:outline-none focus:border-[var(--accent)] transition-colors"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-[10px] uppercase tracking-widest opacity-50">ICT</label>
+                        <input 
+                          type="number" 
+                          value={newMarkIct}
+                          onChange={(e) => setNewMarkIct(e.target.value === '' ? '' : Number(e.target.value))}
+                          placeholder="0-100"
+                          className="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2 focus:outline-none focus:border-[var(--accent)] transition-colors"
+                        />
+                      </div>
+                      <button type="submit" className="btn-primary w-full py-3 flex items-center justify-center gap-2">
+                        <Plus size={18} /> Record Marks
+                      </button>
+                    </form>
+                  </div>
+
+                  {/* Growth Chart */}
+                  <div className="lg:col-span-2 glass-card p-6">
+                    <div className="flex justify-between items-center mb-6">
+                      <h4 className="text-sm font-bold uppercase tracking-widest text-[var(--text-secondary)]">Progress Visualization</h4>
+                      <div className="flex gap-1 bg-white/5 p-1 rounded-lg">
+                        {(['all', 'maths', 'physics', 'ict'] as const).map(f => (
+                          <button
+                            key={f}
+                            onClick={() => setChartSubjectFilter(f)}
+                            className={cn(
+                              "px-3 py-1 text-[10px] uppercase tracking-widest rounded transition-all",
+                              chartSubjectFilter === f ? "bg-[var(--accent)] text-black font-bold" : "text-[var(--text-secondary)] hover:text-white"
+                            )}
+                          >
+                            {f}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="h-[300px] overflow-x-auto custom-scrollbar">
+                      <div style={{ minWidth: marksChartData.length > 10 ? `${marksChartData.length * 40}px` : '100%', height: '100%' }}>
+                        {marksChartData.length > 0 ? (
+                          <ResponsiveContainer width="100%" height="100%">
+                            <LineChart data={marksChartData} margin={{ right: 20, left: -20, top: 10 }}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
+                              <XAxis 
+                                dataKey="id" 
+                                stroke="rgba(255,255,255,0.3)" 
+                                fontSize={10} 
+                                tick={{ fill: 'rgba(255,255,255,0.5)' }}
+                                tickFormatter={(value, index) => marksChartData[index]?.date || ''}
+                                interval={marksChartData.length > 15 ? 2 : 0}
+                              />
+                              <YAxis stroke="rgba(255,255,255,0.3)" fontSize={10} domain={[0, 100]} tick={{ fill: 'rgba(255,255,255,0.5)' }} />
+                              <Tooltip 
+                                contentStyle={{ backgroundColor: '#141414', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '8px' }}
+                                itemStyle={{ fontSize: '12px' }}
+                              />
+                              <Legend wrapperStyle={{ fontSize: '10px', paddingTop: '20px' }} />
+                              {(chartSubjectFilter === 'all' || chartSubjectFilter === 'maths') && (
+                                <Line type="monotone" dataKey="Maths" stroke="#00f2ff" strokeWidth={3} dot={{ r: 4, fill: '#00f2ff', strokeWidth: 0 }} activeDot={{ r: 6 }} connectNulls={true} />
+                              )}
+                              {(chartSubjectFilter === 'all' || chartSubjectFilter === 'physics') && (
+                                <Line type="monotone" dataKey="Physics" stroke="#10b981" strokeWidth={3} dot={{ r: 4, fill: '#10b981', strokeWidth: 0 }} activeDot={{ r: 6 }} connectNulls={true} />
+                              )}
+                              {(chartSubjectFilter === 'all' || chartSubjectFilter === 'ict') && (
+                                <Line type="monotone" dataKey="ICT" stroke="#f59e0b" strokeWidth={3} dot={{ r: 4, fill: '#f59e0b', strokeWidth: 0 }} activeDot={{ r: 6 }} connectNulls={true} />
+                              )}
+                            </LineChart>
+                          </ResponsiveContainer>
+                        ) : (
+                          <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
+                            <TrendingUp size={48} className="mb-4" />
+                            <p className="text-sm italic">No mark history recorded yet.<br/>Add your first set of marks to see growth.</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* History List */}
+                {state.marksHistory.length > 0 && (
+                  <div className="glass-card p-6">
+                    <h4 className="text-sm font-bold uppercase tracking-widest text-[var(--text-secondary)] mb-4">Entry Logs</h4>
+                    <div className="space-y-2 max-h-[200px] overflow-y-auto pr-2 custom-scrollbar">
+                      {state.marksHistory.slice().reverse().map(entry => (
+                        <div key={entry.id} className="flex items-center justify-between p-3 bg-white/5 rounded-lg border border-white/5 hover:border-white/10 transition-colors">
+                          <div className="flex items-center gap-6">
+                            <div className="text-[10px] font-mono opacity-50">{format(parseISO(entry.date), 'yyyy.MM.dd HH:mm')}</div>
+                            <div className="flex gap-4">
+                              {entry.maths !== undefined && <span className="text-xs"><span className="opacity-50">M:</span> <span className="text-[#00f2ff] font-bold">{entry.maths}</span></span>}
+                              {entry.physics !== undefined && <span className="text-xs"><span className="opacity-50">P:</span> <span className="text-[#10b981] font-bold">{entry.physics}</span></span>}
+                              {entry.ict !== undefined && <span className="text-xs"><span className="opacity-50">I:</span> <span className="text-[#f59e0b] font-bold">{entry.ict}</span></span>}
+                            </div>
+                          </div>
+                          <button 
+                            onClick={() => deleteMarkEntry(entry.id)}
+                            className="p-1 text-red-400 hover:bg-red-400/10 rounded transition-all"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </motion.div>
           )}

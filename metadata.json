@@ -1,5 +1,5 @@
 {
   "name": "Aether Study OS",
-  "description": "A futuristic, immersive study command center with real-time exam countdowns, daily planning, and focus tools.",
+  "description": "A futuristic, immersive study command center with multi-user account support, real-time 129-day exam countdown, daily planning, and focus tools.",
   "requestFramePermissions": ["microphone"]
 }
